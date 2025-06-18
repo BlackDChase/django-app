@@ -1,4 +1,4 @@
-# Boot strap DJango Project
+# Bootstrap Django Project
 
 ## Features
 
@@ -11,10 +11,16 @@
 
 ## Command
 
-- Setup
+### Setup
+
+- To do your own set-up you only need setup file.
+
 ```sh
 sh setup.sh my-project-name
 ```
+
+### Maintain server
+
 - Start server
 ```sh
 docker compose up --build
@@ -23,24 +29,30 @@ docker compose up --build
 ```sh
 docker compose down
 ```
-- View logs
+- Docker view
 ```sh
-# Terminal Output
-tail -f logs/django.log
-
-# Docker view
 docker compse ps
-## Web App
-docker compose logs web -f
-## Redis
-docker compose logs redis -f
 ```
-
 - Ping Redis
 ```sh
 redis-cli PING
 # OR
 redis-cli -h 127.0.0.1 -p 6379 PING
+```
+
+### View logs
+- Terminal Output
+```sh
+tail -f logs/django.log
+```
+
+- Web App
+```sh
+docker compose logs web -f
+```
+- Redis
+```sh
+docker compose logs redis -f
 ```
 
 ## Appendix
