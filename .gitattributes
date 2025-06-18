@@ -1,0 +1,18 @@
+# Set default line endings for text files to LF (Unix-style)
+* text=auto
+
+# Explicitly set line endings for Python files to LF
+*.py text eol=lf
+
+# Mark common image/binary files as binary to prevent diffs
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+# Depending on if you want to diff logs
+*.log binary 
