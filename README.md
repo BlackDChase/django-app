@@ -5,8 +5,11 @@
 - `python: 3.13.5`
 - `django: 5.2.3`
 - `Docker V2`
-- `redis 8,0,0`
+- `django-redis 6.0.0`
 - `poetry 2.1.3`
+- `django-prometheus 2.4.0 `
+- `prometheus`
+- `grafana`
 - config via `.env`
 
 ## Command
@@ -21,6 +24,7 @@ sh setup.sh my-project-name
 
 ### Maintain server
 
+#### Server
 - Start server
 ```sh
 docker compose up --build
@@ -39,8 +43,20 @@ redis-cli PING
 # OR
 redis-cli -h 127.0.0.1 -p 6379 PING
 ```
-
-### View logs
+- Swagger
+```
+http://localhost:8000/swagger/#/
+```
+#### Watch Metrics 
+- At port
+```sh
+http://localhost:8000/metrics
+```
+- At Grafana
+```sh
+http://localhost:3000/
+```
+#### View logs
 - Terminal Output
 ```sh
 tail -f logs/django.log

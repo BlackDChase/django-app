@@ -4,9 +4,9 @@ WORKDIR /app
 RUN mkdir -p /app/logs
 
 RUN pip install poetry
-
 COPY pyproject.toml poetry.lock* ./
-RUN poetry config virtualenvs.create false && poetry install --sync --no-root --no-interaction
+RUN poetry config virtualenvs.create false && poetry install --only=main --no-root
+# Either go with no root, or add readme in install
 
 COPY . .
 RUN python manage.py collectstatic --noinput

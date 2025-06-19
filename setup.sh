@@ -1,13 +1,10 @@
 #!/usr/bin/env sh
-
-PROJECT_NAME="{$1:-django-app}"
-
-mkdir $PROJECT_NAME
+PROJECT_NAME="${1:-django-app}"
+mkdir -p $PROJECT_NAME
 cd $PROJECT_NAME
 touch README.md
-
 poetry init --name $PROJECT_NAME --python "3.13.5" --no-interaction
-poetry add django==5.2.3 redis python-dotenv drf-spectacular
+poetry add django==5.2.3 python-dotenv drf-spectacular django-prometheus django-redis
 poetry run django-admin startproject config .
 
 # Create .env file
@@ -18,32 +15,37 @@ ALLOWED_HOSTS=*
 REDIS_URL=redis://redis:6379/1
 EOF
 
-# Create the base project
-poetry run django-admin startproject config .
 poetry run python manage.py startapp core
 
-# Update settings.py for Redis cache
+# Update settings.py
 cat > config/settings.py << 'EOF'
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-key-change-in-production')
-DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
+SECRET_KEY = os.environ.get('SECRET_KEY')
+DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '').split(',')
 
 INSTALLED_APPS = [
+    'django_prometheus',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
+    'drf_spectacular',
     'core',
 ]
 
 MIDDLEWARE = [
+    'django_prometheus.middleware.PrometheusBeforeMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -51,6 +53,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'django_prometheus.middleware.PrometheusAfterMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -73,21 +76,16 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
-DATABASES = {}
-
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'BACKEND': 'django_redis.cache.RedisCache',
         'LOCATION': os.environ.get('REDIS_URL', 'redis://redis:6379/1'),
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            'CONNECTION_POOL_KWARGS': {'retry_on_timeout': True},
+        }
     }
 }
-
-AUTH_PASSWORD_VALIDATORS = [
-    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
-    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
-    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
-    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
-]
 
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
@@ -98,6 +96,38 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{levelname} {asctime} {module} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': '/app/logs/django.log',
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['file'],
+        'level': 'INFO',
+    },
+}
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Django API',
+    'VERSION': '1.0.0',
+}
 EOF
 
 # Create Dockerfile
@@ -105,16 +135,32 @@ cat > Dockerfile << 'EOF'
 FROM python:3.13-slim
 
 WORKDIR /app
+RUN mkdir -p /app/logs
 
 RUN pip install poetry
 COPY pyproject.toml poetry.lock* ./
-RUN poetry config virtualenvs.create false && poetry install --no-dev
+RUN poetry config virtualenvs.create false && poetry install --only=main
 
 COPY . .
 RUN python manage.py collectstatic --noinput
 
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+EOF
+
+# Create prometheus.yml
+cat > prometheus.yml << 'EOF'
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'django'
+    static_configs:
+      - targets: ['web:8000']
+  
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
 EOF
 
 # Create docker-compose.yml
@@ -124,7 +170,16 @@ services:
     image: redis:8.0-alpine
     ports:
       - "6379:6379"
-
+      
+  redis-exporter:
+    image: oliver006/redis_exporter
+    ports:
+      - "9121:9121"
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+    depends_on:
+      - redis
+      
   web:
     build: .
     ports:
@@ -135,6 +190,21 @@ services:
       - redis
     volumes:
       - .:/app
+      - ./logs:/app/logs
+      
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana-data:/var/lib/grafana
 EOF
 
 # Add cache test to core app
@@ -159,9 +229,13 @@ EOF
 cat > config/urls.py << 'EOF'
 from django.contrib import admin
 from django.urls import path, include
+from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('', include('django_prometheus.urls')),
+    path('schema/', SpectacularAPIView.as_view(), name='schema'),
+    path('swagger/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger'),
     path('', include('core.urls')),
 ]
 EOF
@@ -175,102 +249,81 @@ urlpatterns = [
 ]
 EOF
 
-# GIT setup
+# Create .gitignore
 cat > .gitignore << 'EOF'
-# Byte-compiled / optimized / compressed files
 __pycache__/
-*.pyc
-*.pyd
-*.pyo
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-
-# Distributions and builds
-dist/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
 *.egg
-*.whl
-
-# Virtual environment
-venv/
-env/
-.venv/
-
-# IDE specific files
-.idea/  # IntelliJ IDEA / PyCharm
-*.iml
-*.ipr
-*.iws
-.vscode/ # VS Code
-.vscode-server/ # VS Code remote development
-*.sublime-project # Sublime Text
-*.sublime-workspace
-.komodotools/ # Komodo IDE
-.komodoproject
-
-# Operating System Files
-.DS_Store
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
-# Python specific files/directories
-# Django specific:
-db.sqlite3
-/media/  # User-uploaded media files
-/static_collected/ # Collected static files (if using collectstatic)
-*.log
-local_settings.py  # Local environment settings (critical for security)
-.env # If using python-dotenv for environment variables
-
-# Editor Backup files
-*~
-*.bak
-*.swp
-*.swo
-
-# Test/Coverage files
-.coverage
+MANIFEST
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
 htmlcov/
-
-# Jupyter Notebook files
-.ipynb_checkpoints/
-*.ipynb
-
-# Node.js (if using a frontend framework with Django)
-node_modules/
-npm-debug.log
-yarn-error.log
-
-# Docker (if using Docker for development/deployment)
-.dockerignore
-docker-compose.override.yml # Override specific settings for local dev
-*.env # Docker Compose env files
-
-# Misc
-.cache/
-EOF
-
-cat > .gitattributes << 'EOF'
-# Set default line endings for text files to LF (Unix-style)
-* text=auto
-
-# Explicitly set line endings for Python files to LF
-*.py text eol=lf
-
-# Mark common image/binary files as binary to prevent diffs
-*.png binary
-*.jpg binary
-*.jpeg binary
-*.gif binary
-*.ico binary
-*.pdf binary
-*.zip binary
-*.tar binary
-*.gz binary
-# Depending on if you want to diff logs
-*.log binary 
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+*.mo
+*.pot
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+instance/
+.webassets-cache
+.scrapy
+docs/_build/
+.pybuilder/
+target/
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.spyderproject
+.spyproject
+.ropeproject
+/site
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+.ruff_cache/
+logs/
+grafana-data/
 EOF
 
 echo "Setup complete! Run: docker compose up --build"
